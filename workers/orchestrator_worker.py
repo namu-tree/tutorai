@@ -15,6 +15,9 @@ from typing import Any, Dict, Optional
 
 from core.models import (
     AgentCommand,
+    ConceptLight,
+    ConceptStatusUpdate,
+    FinalProblemPackage,
     SessionState,
     SessionUpdate,
     SessionUpdateType,
@@ -29,6 +32,17 @@ from services.event_store import SQLiteEventStore
 
 def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex}"
+
+
+def _concept_names_from_problem(pkg: FinalProblemPackage) -> list[str]:
+    names: list[str] = []
+    if isinstance(pkg.concept_ontology, list):
+        for item in pkg.concept_ontology:
+            if isinstance(item, dict) and "name" in item:
+                names.append(str(item["name"]))
+            elif isinstance(item, str):
+                names.append(item)
+    return names if names else ["미분류"]
 
 
 class OrchestratorWorker:
@@ -178,6 +192,7 @@ class OrchestratorWorker:
                         "student_check": "pass" if last_student else "not_run",
                     },
                 )
+                pkg = FinalProblemPackage.model_validate(final_problem)
                 await self._publish(
                     SessionUpdate(
                         update_id=_new_id("upd"),
@@ -192,6 +207,13 @@ class OrchestratorWorker:
                         },
                     )
                 )
+                # 세션에 현재 문항 저장 + 해당 문항 개념들 초록불로 초기화
+                state = self.store.get_session(session_id) or SessionState(session_id=session_id)
+                state.last_problem = pkg
+                names = _concept_names_from_problem(pkg)
+                state.concept_status = {n: ConceptLight.GREEN.value for n in names}
+                state.last_message = "문항 생성 완료"
+                self.store.upsert_session(state)
                 return
 
             if decision.status.value == "rejected":
@@ -265,16 +287,97 @@ class OrchestratorWorker:
             )
         )
 
-        # Example: hint requested → 간단 힌트(후속으로 LLM 기반 힌트 에이전트 추가 가능)
+        # 힌트 요청 → 해당 문항의 개념을 노란불로 바꾸고 힌트 내용 반환
         if event.event_type == StudentEventType.HINT_REQUESTED:
+            state = self.store.get_session(event.session_id) or SessionState(session_id=event.session_id)
+            hint_text = "풀이 방향을 생각해 보세요."
+            concept_status_updates: list[dict] = []
+            if state.last_problem:
+                names = _concept_names_from_problem(state.last_problem)
+                for n in names:
+                    state.concept_status[n] = ConceptLight.YELLOW.value
+                    concept_status_updates.append(ConceptStatusUpdate(concept=n, status=ConceptLight.YELLOW).model_dump())
+                if state.last_problem.explanation:
+                    hint_text = state.last_problem.explanation.strip().split("\n")[0] or hint_text
+                elif getattr(state.last_problem, "question", None):
+                    hint_text = "지문에서 요구하는 것을 먼저 식으로 나타내 보세요."
+            self.store.upsert_session(state)
             await self._publish(
                 SessionUpdate(
                     update_id=_new_id("upd"),
                     session_id=event.session_id,
                     update_type=SessionUpdateType.HINT,
-                    data={"hint": "현재 MVP에서는 힌트 에이전트가 연결되어 있지 않습니다. 풀이 로그를 더 보내주세요."},
+                    data={
+                        "hint": hint_text,
+                        "concept_status_updates": concept_status_updates,
+                    },
                 )
             )
+            await self._publish(
+                SessionUpdate(
+                    update_id=_new_id("upd"),
+                    session_id=event.session_id,
+                    update_type=SessionUpdateType.CONCEPT_STATUS,
+                    data={"concept_status": state.concept_status},
+                )
+            )
+
+        # 제출(오답) → 오답 분석 + 해당 개념 빨간불/노란불 + 다음 문항 난이도 제안
+        if event.event_type == StudentEventType.SUBMITTED:
+            state = self.store.get_session(event.session_id) or SessionState(session_id=event.session_id)
+            selected = event.payload.get("selected_answer") or event.payload.get("answer_index")
+            correct = None
+            if state.last_problem:
+                correct = state.last_problem.answer
+            if correct is not None and selected is not None and str(selected).strip() != str(correct).strip():
+                names = _concept_names_from_problem(state.last_problem) if state.last_problem else []
+                for n in names:
+                    state.concept_status[n] = ConceptLight.RED.value
+                state.suggested_difficulty = "Level 1"
+                self.store.upsert_session(state)
+                concept_status_updates = [
+                    ConceptStatusUpdate(concept=n, status=ConceptLight.RED).model_dump() for n in names
+                ]
+                analysis = f"선택한 답은 {selected}번입니다. 정답은 {correct}번입니다. 이 문항의 핵심 개념을 다시 확인해 보세요."
+                if names:
+                    analysis += f" (관련 개념: {', '.join(names)})"
+                await self._publish(
+                    SessionUpdate(
+                        update_id=_new_id("upd"),
+                        session_id=event.session_id,
+                        update_type=SessionUpdateType.FEEDBACK,
+                        data={
+                            "wrong_answer_analysis": analysis,
+                            "correct_answer": correct,
+                            "selected_answer": selected,
+                            "concept_status_updates": concept_status_updates,
+                            "suggested_difficulty": state.suggested_difficulty,
+                        },
+                    )
+                )
+                await self._publish(
+                    SessionUpdate(
+                        update_id=_new_id("upd"),
+                        session_id=event.session_id,
+                        update_type=SessionUpdateType.CONCEPT_STATUS,
+                        data={"concept_status": state.concept_status},
+                    )
+                )
+            elif correct is not None and selected is not None and str(selected).strip() == str(correct).strip():
+                state.suggested_difficulty = "Level 2"
+                self.store.upsert_session(state)
+                await self._publish(
+                    SessionUpdate(
+                        update_id=_new_id("upd"),
+                        session_id=event.session_id,
+                        update_type=SessionUpdateType.FEEDBACK,
+                        data={
+                            "correct": True,
+                            "message": "정답입니다.",
+                            "suggested_difficulty": state.suggested_difficulty,
+                        },
+                    )
+                )
 
     async def run(self) -> None:
         cfg = self.bus.config
