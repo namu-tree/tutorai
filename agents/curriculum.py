@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from agents.base import BaseAgent
+from core.curriculum_scope import get_scope_for_prompt
 from core.models import CurriculumReport, TaskSpec
 from services.llm import LLMClient
 
@@ -14,10 +15,11 @@ CURRICULUM_SYSTEM_PROMPT = """
 선수 개념과 금지 개념을 명시한다.
 
 # Rules
-1. 주어진 학년·과정에서 아직 배우지 않은 상위 개념(예: 미적분, 복소수, 행렬 등)은 forbidden_concepts에 넣는다.
-2. 교육과정 범위를 벗어난 대학 수준/올림피아드 수준 개념도 forbidden_concepts에 넣는다.
-3. 실제 문제 생성을 하지 않는다.
-4. 출력은 curriculum_report JSON만 작성한다.
+1. user_payload에 official_scope가 있으면, 그 내용을 최우선으로 따른다. 허용·금지 개념을 그 범위에 맞춘다.
+2. 주어진 학년·과정에서 아직 배우지 않은 상위 개념(예: 미적분, 복소수, 행렬 등)은 forbidden_concepts에 넣는다.
+3. 교육과정 범위를 벗어난 대학 수준/올림피아드 수준 개념도 forbidden_concepts에 넣는다.
+4. 실제 문제 생성을 하지 않는다.
+5. 출력은 curriculum_report JSON만 작성한다.
 """
 
 
@@ -28,8 +30,12 @@ class CurriculumAgent(BaseAgent[TaskSpec, CurriculumReport]):
         self.llm = LLMClient()
 
     def run(self, payload: TaskSpec) -> CurriculumReport:
+        user = payload.model_dump()
+        official = get_scope_for_prompt(payload.grade, payload.unit)
+        if official:
+            user["official_scope"] = official
         return self.llm.structured_generate(
             system_prompt=CURRICULUM_SYSTEM_PROMPT,
-            user_payload=payload.model_dump(),
+            user_payload=user,
             response_model=CurriculumReport,
         )

@@ -6,7 +6,8 @@ from agents.designer import ProblemDesignerAgent
 from agents.final_editor import FinalEditorAgent
 from agents.solver import SolverAgent
 from agents.student_model import StudentModelAgent
-from core.models import GenerationResponse, TaskSpec
+from core.curriculum_scope import get_scope
+from core.models import CurriculumReport, GenerationResponse, TaskSpec
 from core.rules import DecisionRules
 
 
@@ -38,6 +39,20 @@ class Orchestrator:
 
         try:
             curriculum = self.curriculum_agent.run(task_spec)
+            official = get_scope(task_spec.grade, task_spec.unit)
+            if official:
+                allowed = list(dict.fromkeys((official.get("allowed_concepts") or []) + curriculum.allowed_concepts))
+                forbidden = list(dict.fromkeys((official.get("forbidden_concepts") or []) + curriculum.forbidden_concepts))
+                curriculum = CurriculumReport(
+                    message_type=curriculum.message_type,
+                    request_id=curriculum.request_id,
+                    curriculum_fit=curriculum.curriculum_fit,
+                    allowed_concepts=allowed or curriculum.allowed_concepts,
+                    forbidden_concepts=forbidden or curriculum.forbidden_concepts,
+                    prerequisites=curriculum.prerequisites,
+                    recommended_item_patterns=curriculum.recommended_item_patterns,
+                    curriculum_notes=curriculum.curriculum_notes,
+                )
             print("=== CURRICULUM ===")
             print(_safe_dump(curriculum))
         except Exception as e:

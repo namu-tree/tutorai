@@ -83,9 +83,12 @@ def _normalize_for_model(data: dict[str, Any], model_name: str) -> dict[str, Any
 
     if model_name == "CurriculumReport":
         scope = data.get("scope") if isinstance(data.get("scope"), dict) else {}
+        analysis = data.get("analysis") if isinstance(data.get("analysis"), dict) else {}
+
         prerequisites = (
             data.get("prerequisites")
             or data.get("prerequisite_concepts")
+            or analysis.get("prerequisite_concepts")
             or scope.get("prerequisite_concepts")
             or scope.get("prerequisites")
             or data.get("required_concepts")
@@ -98,6 +101,7 @@ def _normalize_for_model(data: dict[str, Any], model_name: str) -> dict[str, Any
             or scope.get("notes_on_scope")
             or data.get("notes_on_edge_cases")
             or data.get("notes")
+            or analysis.get("notes")
             or []
         )
 
@@ -109,14 +113,24 @@ def _normalize_for_model(data: dict[str, Any], model_name: str) -> dict[str, Any
             or []
         )
 
+        allowed = (
+            data.get("allowed_concepts")
+            or analysis.get("in_scope_concepts")
+            or analysis.get("allowed_concepts")
+            or scope.get("allowed_concepts")
+        )
+        forbidden = (
+            data.get("forbidden_concepts")
+            or analysis.get("forbidden_concepts")
+            or scope.get("forbidden_concepts")
+        )
+
         return {
             "message_type": "curriculum_report",
             "request_id": data.get("request_id", ""),
             "curriculum_fit": data.get("curriculum_fit", "pass"),
-            "allowed_concepts": _to_str_list(data.get("allowed_concepts") or scope.get("allowed_concepts")),
-            "forbidden_concepts": _to_str_list(
-                data.get("forbidden_concepts") or scope.get("forbidden_concepts")
-            ),
+            "allowed_concepts": _to_str_list(allowed),
+            "forbidden_concepts": _to_str_list(forbidden),
             "prerequisites": _to_str_list(prerequisites),
             "recommended_item_patterns": _to_str_list(recommended_item_patterns),
             "curriculum_notes": _to_str_list(curriculum_notes),
@@ -126,6 +140,12 @@ def _normalize_for_model(data: dict[str, Any], model_name: str) -> dict[str, Any
         problem_block = data.get("problem") or data
         solution_block = data.get("solution", {})
         diagnostic_block = data.get("diagnostic", {})
+
+        # items: [ { stem, options/choices, answer/answer_key } ] 형태 처리
+        if isinstance(data.get("items"), list) and len(data["items"]) > 0:
+            first = data["items"][0]
+            if isinstance(first, dict):
+                problem_block = first
 
         if isinstance(problem_block, dict):
             question = (
@@ -142,13 +162,28 @@ def _normalize_for_model(data: dict[str, Any], model_name: str) -> dict[str, Any
                 or []
             )
             intended_answer = (
-                problem_block.get("correct_answer")
+                problem_block.get("answer_key")
+                or problem_block.get("answer")
+                or problem_block.get("correct_answer")
                 or problem_block.get("correct_choice")
+                or data.get("answer_key")
+                or data.get("answer")
                 or data.get("correct_answer")
                 or data.get("correct_choice")
                 or data.get("answer_index")
                 or ""
             )
+            if not intended_answer:
+                idx = problem_block.get("correct_choice_index") or data.get("correct_choice_index")
+                if idx is not None:
+                    try:
+                        i = int(idx)
+                        if 1 <= i <= 26:
+                            intended_answer = chr(ord("A") + i - 1)
+                        else:
+                            intended_answer = str(i)
+                    except (TypeError, ValueError):
+                        pass
         else:
             if isinstance(problem_block, str) and problem_block.strip():
                 question = problem_block
@@ -178,6 +213,17 @@ def _normalize_for_model(data: dict[str, Any], model_name: str) -> dict[str, Any
                 or data.get("correct")
                 or ""
             )
+            if not intended_answer:
+                idx = data.get("correct_choice_index")
+                if idx is not None:
+                    try:
+                        i = int(idx)
+                        if 1 <= i <= 26:
+                            intended_answer = chr(ord("A") + i - 1)
+                        else:
+                            intended_answer = str(i)
+                    except (TypeError, ValueError):
+                        pass
 
         if isinstance(intended_answer, int):
             if 1 <= intended_answer <= 5:
@@ -188,7 +234,10 @@ def _normalize_for_model(data: dict[str, Any], model_name: str) -> dict[str, Any
                 intended_answer = str(intended_answer)
 
         if isinstance(raw_options, list) and raw_options and isinstance(raw_options[0], dict):
-            raw_options = [opt.get("text", "") for opt in raw_options]
+            raw_options = [
+                str(opt.get("text") or opt.get("label") or opt.get("value") or opt.get("id") or "")
+                for opt in raw_options
+            ]
 
         intended_solution_path = (
             solution_block.get("outline")
