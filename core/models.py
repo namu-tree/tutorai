@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field
@@ -172,3 +173,95 @@ class GenerationResponse(BaseModel):
     last_critic_report: Optional[CriticReport] = None
     last_student_report: Optional[StudentAlignmentReport] = None
     message: str
+
+
+# -------- Realtime session / A2A messaging models --------
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+class StudentEventType(str, Enum):
+    SESSION_STARTED = "session_started"
+    ATTEMPT_STARTED = "attempt_started"
+    ANSWER_SELECTED = "answer_selected"
+    WORK_STEP_ADDED = "work_step_added"
+    HINT_REQUESTED = "hint_requested"
+    SUBMITTED = "submitted"
+    TIME_TICK = "time_tick"
+
+
+class SessionUpdateType(str, Enum):
+    STATUS = "status"
+    PROBLEM_PUBLISHED = "problem_published"
+    HINT = "hint"
+    FEEDBACK = "feedback"
+    CONCEPT_STATUS = "concept_status"
+    NEXT_PROBLEM = "next_problem"
+    ERROR = "error"
+
+
+class ConceptLight(str, Enum):
+    """개념 신호등: 초록=양호, 노랑=힌트 사용/주의, 빨강=오답/미숙"""
+    GREEN = "green"
+    YELLOW = "yellow"
+    RED = "red"
+
+
+class ConceptStatusUpdate(BaseModel):
+    concept: str
+    status: ConceptLight
+
+
+class StudentEvent(BaseModel):
+    event_id: str
+    session_id: str
+    event_type: StudentEventType
+    created_at: str = Field(default_factory=utc_now_iso)
+    payload: Dict[str, Any] = Field(default_factory=dict)
+
+
+class SessionUpdate(BaseModel):
+    update_id: str
+    session_id: str
+    update_type: SessionUpdateType
+    created_at: str = Field(default_factory=utc_now_iso)
+    data: Dict[str, Any] = Field(default_factory=dict)
+
+
+class SessionState(BaseModel):
+    session_id: str
+    task_spec: Optional[TaskSpec] = None
+    last_problem: Optional[FinalProblemPackage] = None
+    last_message: str = ""
+    concept_status: Dict[str, str] = Field(default_factory=dict)  # 개념명 -> green|yellow|red
+    suggested_difficulty: Optional[str] = None  # 다음 문항 난이도 제안 (Level 1 등)
+    created_at: str = Field(default_factory=utc_now_iso)
+    updated_at: str = Field(default_factory=utc_now_iso)
+
+
+class AgentCommand(BaseModel):
+    command_id: str
+    session_id: str
+    agent_name: str
+    created_at: str = Field(default_factory=utc_now_iso)
+    payload: Dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentResult(BaseModel):
+    command_id: str
+    session_id: str
+    agent_name: str
+    created_at: str = Field(default_factory=utc_now_iso)
+    ok: bool = True
+    result: Dict[str, Any] = Field(default_factory=dict)
+    error: str = ""
+
+
+class SessionCreateRequest(BaseModel):
+    task_spec: TaskSpec
+
+
+class SessionCreateResponse(BaseModel):
+    session_id: str
